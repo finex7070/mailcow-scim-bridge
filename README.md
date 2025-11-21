@@ -3,7 +3,8 @@
 A lightweight SCIM 2.0 bridge built with FastAPI and Docker.
 
 **Created for Authentik ➔ Mailcow mailbox provisioning.**  
-Built by MacJediWizard 🚀
+Created by Jan Hüls "finex7070" StickyStoneStudio GmbH 🚀
+Originally created by: William Grzybowski "MacJediWizard" MacJediWizard Consulting, Inc. 🤝
 
 ---
 
@@ -11,12 +12,16 @@ Built by MacJediWizard 🚀
 
 - 🔐 Secure SCIM 2.0 Server using FastAPI
 - 📬 Automatic mailbox provisioning in Mailcow
-- 🧠 SCIM group → Mailcow mailbox custom attribute mapping (`groups`)
-- 🛡️ Auto-promotion/removal to/from Mailcow Domain Admins via SCIM group membership
 - 📈 Built-in `/metrics` endpoint for Prometheus / Grafana monitoring
 - 🐳 Dockerized for fast, reproducible deployment
-- ✅ SCIM standard support: `GET`, `POST`, `PUT`, `PATCH`
+- ✅ SCIM standard support: `GET`, `POST`, `PUT`, `DELETE`
 - 🔄 Sync-ready with Authentik SCIM provider
+
+---
+
+## Planned Features
+
+- 🧠 Add SCIM Group to mailbox tags and create and alias which sends to all members (`groups`)
 
 ---
 
@@ -25,10 +30,9 @@ Built by MacJediWizard 🚀
 ### 1. Clone and Deploy
 
 ```bash
-git clone https://github.com/YOURUSERNAME/scim-bridge-docker.git
-cd scim-bridge-docker
-cp .env.example .env
-# Edit the .env file with your API keys, domain, and token
+git clone https://github.com/finex7070/mailcow-scim-bridge.git
+cd mailcow-scim-bridge
+# Edit the docker-compose.yml file
 docker compose up -d
 ```
 
@@ -40,9 +44,9 @@ docker compose up -d
 |--------------------|-------------|
 | `SCIM_TOKEN`       | Bearer token used to authenticate SCIM requests |
 | `MAILCOW_API_URL`  | Base URL of the Mailcow Admin API (e.g. `https://mail.example.com/api/v1/`) |
-| `MAILCOW_API_KEY`  | Mailcow API Key with admin privileges |
-| `DEFAULT_DOMAIN`   | Default domain for mailbox provisioning |
-| `API_PORT`         | (Optional) Port to expose the FastAPI server (default: `8484`) |
+| `MAILCOW_API_KEY`  | Mailcow API Key with read + write access |
+| `SKIP_VERIFY_CERTIFICATE`  | Skip ssl certificate verification |
+| `ALLOW_DELETE`  | Allow deleting users/mailboxes |
 
 ---
 
@@ -53,8 +57,8 @@ docker compose up -d
 | `/healthz`                | `GET`                  | Healthcheck endpoint |
 | `/metrics`                | `GET`                  | Prometheus metrics (for Grafana) |
 | `/ServiceProviderConfig`  | `GET`                  | SCIM metadata |
-| `/Users`                  | `GET`, `POST`, `PUT`   | Sync and provision Mailcow users |
-| `/Groups`                 | `GET`, `POST`, `PUT`, `PATCH` | Sync SCIM groups → Mailcow custom attributes |
+| `/Users`                  | `GET`, `POST`, `PUT`,  `DELETE`  | Sync and provision Mailcow users/mailboxes |
+| `/Groups`                 | `GET`, `POST`, `PUT`, `DELETE` | Only placeholder for now |
 
 ---
 
@@ -62,11 +66,7 @@ docker compose up -d
 
 1. Authentik SCIM sends a sync request to the FastAPI SCIM server.
 2. The server authenticates via the provided SCIM bearer token.
-3. SCIM `/Users` → Mailcow mailbox creation (with strong defaults).
-4. SCIM `/Groups` → Mailcow mailbox `custom-attributes.groups` assignment.
-5. If a user is added to the SCIM group **"Mailcow Domain Admins"**, the server will:
-   - Automatically promote them via Mailcow's `/add/domain-admin`.
-6. If the user is later removed from that group, they are demoted via `/delete/domain-admin`.
+3. SCIM `/Users` → Mailcow mailbox creation (with authsource generic-oidc).
 
 ---
 
@@ -74,7 +74,7 @@ docker compose up -d
 
 - 🐳 Docker + Docker Compose
 - 🧠 Basic knowledge of SCIM and Mailcow API
-- 🔐 A valid Mailcow admin API key
+- 🔐 A valid Mailcow API key with read + write access
 - ⚙️ Authentik instance or SCIM-compatible identity provider
 
 ---
@@ -89,10 +89,15 @@ GET /metrics
 
 Sample output:
 ```text
-users_synced_total 42
-groups_synced_total 17
-domain_admins_created_total 4
-domain_admins_deleted_total 2
+# HELP users_created SCIM metric for users_created
+# TYPE users_created counter
+users_created 10
+# HELP users_updated SCIM metric for users_updated
+# TYPE users_updated counter
+users_updated 10
+# HELP users_deleted SCIM metric for users_deleted
+# TYPE users_deleted counter
+users_deleted 0
 ```
 
 ---
@@ -103,4 +108,4 @@ MIT License
 
 ---
 
-> Made with ❤️ by [MacJediWizard Consulting, Inc.](https://macjediwizard.com)
+> Made with ❤️ by [StickyStoneStudio GmbH](https://www.stickystonestudio.com) and [MacJediWizard Consulting, Inc.](https://macjediwizard.com)

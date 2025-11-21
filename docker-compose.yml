@@ -1,31 +1,29 @@
-version: "3.9"
-
 services:
-  scim-bridge:
-    image: scim-bridge-docker:latest
-    container_name: scim-bridge-docker
-    restart: unless-stopped
-
-    environment:
-      - SCIM_TOKEN=${SCIM_TOKEN}
-      - MAILCOW_API_URL=${MAILCOW_API_URL}
-      - MAILCOW_API_KEY=${MAILCOW_API_KEY}
-      - DEFAULT_DOMAIN=${DEFAULT_DOMAIN}
-      - DEFAULT_DOMAIN_ADMIN_PASSWORD=${DEFAULT_DOMAIN_ADMIN_PASSWORD}
-      - DOMAIN_ADMIN_GROUP_NAME=${DOMAIN_ADMIN_GROUP_NAME}
-
-    ports:
-      - "8484:8484"
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8484/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-    networks:
-      - scim-bridge-docker-network
-
-networks:
-  scim-bridge-docker-network:
-    driver: bridge
+ server:
+  build: .
+  container_name: mailcow-scim-bridge
+  restart: always
+  volumes:
+    - data:/data
+  environment:
+   # Bearer token for scim authentification
+   SCIM_TOKEN: changeme
+   # Mailcow api url
+   MAILCOW_API_URL: https://mail.example.com/api/v1/
+   # Mailcow api key
+   MAILCOW_API_KEY: changeme
+   # Skip ssl certificate verification
+   SKIP_VERIFY_CERTIFICATE: false
+   # Allow deleting users/mailboxes
+   ALLOW_DELETE: false
+  ports:
+   - "8081:8080"
+  healthcheck:
+   test: ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"]
+   interval: 30s
+   timeout: 5s
+   retries: 3
+   start_period: 10s
+   
+volumes:
+  data:

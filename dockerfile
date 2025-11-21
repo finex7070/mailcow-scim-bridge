@@ -1,7 +1,6 @@
-FROM python:3.11-slim
+FROM python:3-alpine
 
-# Install curl
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl
 
 WORKDIR /app
 
@@ -10,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8484"]
+CMD ["uvicorn", "app.main:api", "--host", "0.0.0.0", "--port", "8080"]

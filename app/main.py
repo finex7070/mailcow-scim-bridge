@@ -1,355 +1,545 @@
 #!/usr/bin/env python3
 #########################################################################################################################################################################
 #
-# MacJediWizard Consulting, Inc.
-# Copyright (c) 2025 MacJediWizard Consulting, Inc.
-# All rights reserved.
-# Created by: William Grzybowski
+# Created by: Jan Hüls "finex7070" StickyStoneStudio GmbH
+# Originally created by: William Grzybowski "MacJediWizard" MacJediWizard Consulting, Inc.
 #
 # Script: main.py
-#
 #
 # Description:
 # - This FastAPI application serves as a SCIM 2.0 bridge for provisioning and managing Mailcow mailboxes.
 # - Built for integration with Authentik or other SCIM-compatible identity providers.
 # - Automatically provisions mailboxes using SCIM `/Users` endpoints.
-# - Maps SCIM group memberships to Mailcow mailbox custom attributes (`groups`).
-# - Promotes users to Mailcow Domain Admins if they are part of a designated SCIM group (e.g., "Mailcow Domain Admins").
-# - Removes Domain Admin privileges when users are removed from that group.
 # - Provides a Prometheus-compatible `/metrics` endpoint for monitoring and observability.
 # - Secured with Bearer token authentication for all SCIM endpoints.
-# - Fully containerized for deployment via Docker or Portainer.
-#
+# - Fully containerized for deployment via Docker Compose or Portainer.
 #
 # Notes:
 # - Expects environment variables for API keys and configuration.
-# - Intended for internal/private use; authentication required.
 # - All responses follow SCIM 2.0 standards where applicable.
 #
+# Planned:
+# - Maps SCIM group memberships to mailbox tags and create and alias which sends to all members.
 #
 # License:
 # This application is licensed under the MIT License.
 # See the LICENSE file in the root of this repository for details.
 #
-#
-# Change Log:
-# Version 0.1.0 - 2025-04-27
-#   - Initial creation of SCIM bridge FastAPI application.
-#
-# Version 0.1.1 - 2025-04-28
-#   - Updated documentation and added Portainer deployment instructions.
-#   - Updated health check endpoint to /healthz.
-#
-# Version 0.1.2 - 2025-04-28
-#   - Added curl installation to Dockerfile for health check functionality.
-#   - Updated Dockerfile to install necessary dependencies.
-#   - Updated health check in container to ensure service is running correctly.
-#
-# Version 0.1.3 - 2025-04-28
-#   - Updated Mailcow API integration to correctly create mailboxes.
-#   - Updated SCIM User creation endpoint to handle mailbox creation with proper parameters.
-#   - Updated user creation logic to handle Mailcow API's expected mailbox fields.
-#
-# Version 0.1.4 - 2025-04-28
-#   - Added SCIM ServiceProviderConfig endpoint to provide metadata for SCIM integrations.
-#   - Added SCIM Groups endpoint for group creation (currently returns a mock success response).
-#
-# Version 0.1.5 - 2025-04-28
-#   - Implemented SCIM GET /Users and GET /Users/{id} for full sync support.
-#   - Added SCIM GET /Groups returning empty list for group sync.
-#
-# Version 0.1.6 - 2025-04-28
-#   - SCIM POST /Users now returns full SCIM User resource and HTTP 201.
-#   - SCIM POST /Groups now returns full SCIM Group resource and HTTP 201.
-#
-# Version 0.1.7 - 2025-04-28
-#   - Added SCIM PUT /Users/{id} to support Authentik full-sync updates.
-#   - Added SCIM PUT /Groups/{id} and PATCH /Groups/{id} to avoid 404/405 during group sync.
-#
-# Version 0.1.8 - 2025-04-28
-#   - Split SCIMUser/SCIMGroup into Create vs Resource models.
-#   - POST /Users and PUT /Users/{id} now accept minimal payloads.
-#   - No-op PUT/PATCH on Groups to satisfy Authentik sync.
-#
-# Version 0.1.9 - 2025-04-28
-#   - Ensured mailbox provisioning on PUT /Users/{id} by calling Mailcow API.
-#   - Added error handling for Mailcow API failures during full-sync updates.
-#
-# Version 0.1.10 - 2025-04-28
-#   - Split SCIMUser/SCIMGroup into Create vs Resource models.
-#   - POST & PUT /Users now accept minimal payloads and provision mailboxes.
-#   - Error on Mailcow failure is surfaced as HTTP 400.
-#
-# Version 0.1.11 - 2025-04-28
-#   - Introduced helper to update Mailcow mailbox custom attributes.
-#   - Wire up Mailcow custom-attribute endpoint in all SCIM group operations.
-#
-# Version 0.1.12 - 2025-04-28
-#   - Automatically set `groups` custom-attribute on mailboxes when SCIM POST/PUT/PATCH /Groups is invoked.
-#   - Consolidated custom-attribute logic into `update_mailcow_custom_attr`.
-#
-# Version 0.1.13 - 2025-04-28
-#   - Provision mailboxes using SCIM payload's `emails[0].value` instead of `userName`.
-#   - Supports users whose `userName` is not a valid email address.
-#
-# Version 0.1.14 - 2025-04-28
-#   - Improved SCIM PATCH /Groups endpoint to correctly handle SCIM PatchOp requests.
-#   - Fixed Mailcow custom-attribute payload to match Mailcow API v1 expectations.
-#   - Full group update now properly updates mailbox "groups" custom attribute.
-#   - Resolved Authentik 422 errors on group syncs.
-#
-# Version 0.1.15 - 2025-04-28
-#   - Implemented GET /Groups/{id} endpoint to satisfy Authentik SCIM lookup during sync.
-#   - Fixed SCIM PATCH /Groups/{id} to properly parse PatchOp and update mailbox custom attributes.
-#   - Fully resolved 405 and 422 errors during group synchronization with Authentik.
-#
-# Version 0.1.16 - 2025-04-28
-#   - Multi-group assignment to mailbox custom attributes supported.
-#   - Domain Admin auto-provisioning via /api/v1/add/domain-admin if user belongs to 'Mailcow Domain Admins'.
-#   - Full SCIM PATCH and PUT on groups now supported for complex mappings.
-#
 #########################################################################################################################################################################
 
-from fastapi import FastAPI, Header, HTTPException, Query, status
-from pydantic import BaseModel
-from typing import List, Optional
-import httpx, os
+import os, httpx, sqlite3, uuid, json
 from dotenv import load_dotenv
+from typing import List, Optional
+from pydantic import BaseModel
+from fastapi import FastAPI, Header, HTTPException, Query, status
+from fastapi.responses import PlainTextResponse
 
 load_dotenv()
 
+DB_PATH= os.getenv("DB_PATH", "/data/data.db")
 SCIM_TOKEN = os.getenv("SCIM_TOKEN")
 MAILCOW_API_URL = os.getenv("MAILCOW_API_URL")
 MAILCOW_API_KEY = os.getenv("MAILCOW_API_KEY")
-DEFAULT_DOMAIN = os.getenv("DEFAULT_DOMAIN")
-DOMAIN_ADMIN_GROUP_NAME = os.getenv("DOMAIN_ADMIN_GROUP_NAME")
-DEFAULT_DOMAIN_ADMIN_PASSWORD = os.getenv("DEFAULT_DOMAIN_ADMIN_PASSWORD")
+SKIP_VERIFY_CERTIFICATE = os.getenv("SKIP_VERIFY_CERTIFICATE", False)
+ALLOW_DELETE = os.getenv("ALLOW_DELETE", False)
 
 REQUIRED_ENV_VARS = {
     "SCIM_TOKEN": SCIM_TOKEN,
     "MAILCOW_API_URL": MAILCOW_API_URL,
     "MAILCOW_API_KEY": MAILCOW_API_KEY,
-    "DEFAULT_DOMAIN": DEFAULT_DOMAIN,
-    "DOMAIN_ADMIN_GROUP_NAME": DOMAIN_ADMIN_GROUP_NAME,
-    "DEFAULT_DOMAIN_ADMIN_PASSWORD": DEFAULT_DOMAIN_ADMIN_PASSWORD,
 }
 
 missing = [k for k, v in REQUIRED_ENV_VARS.items() if not v]
 if missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
-    
-app = FastAPI()
 
-# --- Metrics ---
-metrics = {
-    "users_synced_total": 0,
-    "groups_synced_total": 0,
-    "domain_admins_created_total": 0,
-    "domain_admins_deleted_total": 0,
-}
+api = FastAPI()
 
-# --- Models ---
-class SCIMUserCreate(BaseModel):
-    userName: str
-    name: dict = {}
-    emails: list
-    
-class SCIMGroupCreate(BaseModel):
-    displayName: str
-    members: list = []
-    
-class SCIMPatchOp(BaseModel):
-    op: str
-    path: Optional[str] = None
-    value: Optional[list] = None
-    
-class SCIMPatchRequest(BaseModel):
-    schemas: List[str]
-    Operations: List[SCIMPatchOp]
-    
+# --- Database ---
+dbconn = sqlite3.connect(DB_PATH)
+dbcur = dbconn.cursor()
+
+dbcur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    mailcowId TEXT,
+    scimId TEXT,
+    active INTEGER,
+    userName TEXT UNIQUE,
+    displayName TEXT,
+    emails TEXT
+)
+""")
+
+# dbcur.execute("""
+# CREATE TABLE IF NOT EXISTS groups (
+#     id TEXT PRIMARY KEY,
+#     mailcowId TEXT,
+#     scimId TEXT,
+#     active INTEGER,
+#     displayName TEXT,
+#     members TEXT
+# )
+# """)
+
+dbcur.execute("""
+CREATE TABLE IF NOT EXISTS metrics (
+    name TEXT PRIMARY KEY,
+    value INTEGER
+)
+""")
+
+dbcur.execute("""
+    INSERT INTO metrics (name, value)
+    VALUES ('users_created', 0)
+    ON CONFLICT(name) DO NOTHING
+""")
+
+dbcur.execute("""
+    INSERT INTO metrics (name, value)
+    VALUES ('users_updated', 0)
+    ON CONFLICT(name) DO NOTHING
+""")
+
+dbcur.execute("""
+    INSERT INTO metrics (name, value)
+    VALUES ('users_deleted', 0)
+    ON CONFLICT(name) DO NOTHING
+""")
+
+dbconn.commit()
+dbconn.close()
+
+# --- Scim Models ---
 class SCIMUser(BaseModel):
     schemas: list
-    id: str
+    id: Optional[str] = None
+    externalId: Optional[str] = None
+    active: bool
     userName: str
-    name: dict
+    displayName: Optional[str] = None
     emails: list
-    externalId: str = None
     
+class SCIMGroup(BaseModel):
+    schemas: list
+    id: Optional[str] = None
+    externalId: Optional[str] = None
+    displayName: str
+    members: Optional[list] = None
+
 class SCIMListResponse(BaseModel):
     schemas: list
     totalResults: int
     itemsPerPage: int
     startIndex: int
     Resources: list
-    
-class SCIMGroup(BaseModel):
-    schemas: list
-    id: str
-    displayName: str
-    members: list
-    
-class SCIMGroupListResponse(BaseModel):
-    schemas: list
-    totalResults: int
-    itemsPerPage: int
-    startIndex: int
-    Resources: list
-    
-# --- Mailcow Helpers ---
-async def fetch_mailcow_mailboxes():
-    url = f"{MAILCOW_API_URL}get/mailbox/all/{DEFAULT_DOMAIN}"
-    headers = {"X-API-Key": MAILCOW_API_KEY}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()
 
-async def create_mailcow_mailbox(email: str, display_name: str):
-    domain, local = email.split("@")[-1], email.split("@")[0]
+# --- API ---
+def get_async_client():
+    if SKIP_VERIFY_CERTIFICATE:
+        return httpx.AsyncClient(verify=False)
+    else:
+        return httpx.AsyncClient()
+    
+def get_metrics():
+    dbconn = sqlite3.connect(DB_PATH)
+    dbcur = dbconn.cursor()
+    dbcur.execute("SELECT name, value FROM metrics")
+    rows = dbcur.fetchall()
+    metrics = []
+    for name, value in rows:
+        metrics.append(f"# HELP {name} SCIM metric for {name}")
+        metrics.append(f"# TYPE {name} counter")
+        metrics.append(f"{name} {value}")
+    dbconn.close()
+    return "\n".join(metrics)
+    
+def get_primary_mail(mails: list):
+    if len(mails) < 1:
+        return None
+    for mail in mails:
+        if mail.get("primary") is True:
+            return mail.get("value")
+    return mail[0].get("value")
+
+async def create_user(user: SCIMUser):
+    email = get_primary_mail(user.emails)
+    if email is not None:
+        dbconn = sqlite3.connect(DB_PATH)
+        dbcur = dbconn.cursor()
+        dbcur.execute("SELECT 1 FROM users WHERE scimId = ? OR userName = ?", (user.externalId, user.userName))
+        if dbcur.fetchone():
+            dbconn.close()
+            raise HTTPException(status_code=409, detail={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                "status": "409",
+                "scimType": "uniqueness",
+                "detail": f"User with id '{user.externalId}' or userName '{user.userName}' already exists",
+            })
+        code, resp = await create_mailbox(email.split("@")[0], email.split("@")[1], user.displayName)
+        if code == 200 and resp and resp[0]["type"] == "success":
+            user.id = str(uuid.uuid4())
+            dbcur.execute("""
+                INSERT INTO users (id, mailcowId, scimId, active, userName, displayName, emails)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user.id,
+                resp[0]["msg"][1],
+                user.externalId,
+                int(user.active),
+                user.userName,
+                user.displayName,
+                json.dumps(user.emails)
+            ))
+            dbcur.execute("""
+                UPDATE metrics
+                SET value = value + 1
+                WHERE name = 'users_created'
+            """)
+            dbconn.commit()
+            dbconn.close()
+            return user
+        else:
+            dbconn.close()
+            raise HTTPException(status_code=502, detail={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                "status": "502",
+                "scimType": "serverError",
+                "detail": "Request failed: upstream API returned an error",
+            })
+    else:
+        raise HTTPException(status_code=400, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "400",
+            "scimType": "invalidSyntax",
+            "detail": f"Missing required attribute: emails"
+        })
+    
+def get_user(id: str):
+    dbconn = sqlite3.connect(DB_PATH)
+    dbcur = dbconn.cursor()
+    dbcur.execute("""
+        SELECT id, scimId, active, userName, displayName, emails
+        FROM users
+        WHERE id = ?
+    """, (id,))
+    row = dbcur.fetchone()
+    if not row:
+        dbconn.close()
+        raise HTTPException(status_code=404, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "404",
+            "scimType": "notFound",
+            "detail": f"User with id '{id}' not found"
+        })
+    user = SCIMUser(
+        schemas=["urn:ietf:params:scim:schemas:core:2.0:User"],
+        id=id,
+        externalId=row[1],
+        active=bool(row[2]),
+        userName=row[3],
+        displayName=row[4],
+        emails=json.loads(row[5])
+    )
+    dbconn.close()
+    return user
+
+def get_users(index: int, count: int):
+    dbconn = sqlite3.connect(DB_PATH)
+    dbcur = dbconn.cursor()
+    offset = max(index - 1, 0)
+    dbcur.execute("SELECT COUNT(*) FROM users")
+    total = dbcur.fetchone()[0]
+    dbcur.execute("""
+        SELECT id, scimId, active, userName, displayName, emails
+        FROM users
+        LIMIT ? OFFSET ?
+    """, (count, offset))
+    rows = dbcur.fetchall()
+    resources: List[SCIMUser] = []
+    for row in rows:
+        user = SCIMUser(
+            schemas=["urn:ietf:params:scim:schemas:core:2.0:User"],
+            id=id,
+            externalId=row[1],
+            active=bool(row[2]),
+            userName=row[3],
+            displayName=row[4],
+            emails=json.loads(row[5])
+        )
+        resources.append(user)
+    dbconn.close()
+    return SCIMListResponse(
+        schemas=["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+        totalResults=total,
+        itemsPerPage=len(resources),
+        startIndex=index,
+        Resources=resources
+    )
+
+async def delete_user(id: str):
+    if not ALLOW_DELETE:
+        raise HTTPException(status_code=403, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "403",
+            "scimType": "mutability",
+            "detail": f"Deletion of user with id '{id}' is not allowed."
+        })
+    dbconn = sqlite3.connect(DB_PATH)
+    dbcur = dbconn.cursor()
+    dbcur.execute("SELECT mailcowId FROM users WHERE id = ?", (id))
+    row = dbcur.fetchone()
+    if not row:
+        dbconn.close()
+        raise HTTPException(status_code=404, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "404",
+            "scimType": "notFound",
+            "detail": f"User with id '{id}' not found"
+        })
+    code, resp = await delete_mailbox(row[0])
+    if code == 200 and resp and resp[0]["type"] == "success":
+        dbcur.execute("DELETE FROM users WHERE id = ?", (id))
+        dbcur.execute("""
+            UPDATE metrics
+            SET value = value + 1
+            WHERE name = 'users_deleted'
+        """)
+        dbconn.commit()
+        dbconn.close()
+    else:
+        dbconn.close()
+        raise HTTPException(status_code=502, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "502",
+            "scimType": "serverError",
+            "detail": "Request failed: upstream API returned an error",
+        })
+
+async def update_user(id: str, user: SCIMUser):
+    email = get_primary_mail(user.emails)
+    if email is not None:
+        dbconn = sqlite3.connect(DB_PATH)
+        dbcur = dbconn.cursor()
+        dbcur.execute("""
+            SELECT mailcowId, emails
+            FROM users
+            WHERE id = ?
+        """, (id,))
+        row = dbcur.fetchone()
+        if not row:
+            dbconn.close()
+            raise HTTPException(status_code=404, detail={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                "status": "404",
+                "scimType": "notFound",
+                "detail": f"User with id '{id}' not found"
+            })
+        emails = json.loads(row[1])
+        email2 = get_primary_mail(emails)
+        if email == email2:
+            code, resp = await update_mailbox(row[0], user.active, user.displayName)
+            if code == 200 and resp and resp[0]["type"] == "success":
+                dbcur.execute("""
+                    Update users
+                    SET mailcowId = ?
+                        scimId = ?,
+                        active = ?,
+                        userName = ?,
+                        displayName = ?,
+                        emails = ?
+                    WHERE id = ?
+                """, (
+                    row[0],
+                    user.externalId,
+                    int(user.active),
+                    user.userName,
+                    user.displayName,
+                    json.dumps(user.emails),
+                    user.id
+                ))
+                dbcur.execute("""
+                    UPDATE metrics
+                    SET value = value + 1
+                    WHERE name = 'users_updated'
+                """)
+                dbconn.commit()
+                dbconn.close()
+                return user
+            else:
+                dbconn.close()
+                raise HTTPException(status_code=502, detail={
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                    "status": "502",
+                    "scimType": "serverError",
+                    "detail": "Request failed: upstream API returned an error",
+                })
+        else:
+            if not ALLOW_DELETE:
+                raise HTTPException(status_code=403, detail={
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                    "status": "403",
+                    "scimType": "mutability",
+                    "detail": f"Deletion of user with id '{id}' is not allowed."
+                })
+            code, resp = await delete_mailbox(row[0])
+            if code == 200 and resp and resp[0]["type"] == "success":
+                code, resp = await create_mailbox(email.split("@")[0], email.split("@")[1], user.displayName)
+                if code == 200 and resp and resp[0]["type"] == "success":
+                    dbcur.execute("""
+                        Update users
+                        SET mailcowId = ?
+                            scimId = ?,
+                            active = ?,
+                            userName = ?,
+                            displayName = ?,
+                            emails = ?
+                        WHERE id = ?
+                    """, (
+                        resp[0]["msg"][1],
+                        user.externalId,
+                        int(user.active),
+                        user.userName,
+                        user.displayName,
+                        json.dumps(user.emails),
+                        user.id
+                    ))
+                    dbcur.execute("""
+                        UPDATE metrics
+                        SET value = value + 1
+                        WHERE name = 'users_updated'
+                    """)
+                    dbconn.commit()
+                    dbconn.close()
+                    return user
+                else:
+                    dbconn.close()
+                    raise HTTPException(status_code=502, detail={
+                        "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                        "status": "502",
+                        "scimType": "serverError",
+                        "detail": "Request failed: upstream API returned an error",
+                    })
+            else:
+                dbconn.close()
+                raise HTTPException(status_code=502, detail={
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                    "status": "502",
+                    "scimType": "serverError",
+                    "detail": "Request failed: upstream API returned an error",
+                })
+    else:
+        raise HTTPException(status_code=400, detail={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            "status": "400",
+            "scimType": "invalidSyntax",
+            "detail": f"Missing required attribute: emails"
+        })
+
+# --- Mailcow Helper ---
+async def get_mailbox(id: str):
+    url = f"{MAILCOW_API_URL}get/mailbox/{id}"
+    headers = {"X-API-Key": MAILCOW_API_KEY}
+    async with get_async_client() as client:
+        resp = await client.post(url, headers=headers)
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, None
+
+async def create_mailbox(local_part: str, domain: str, name: str):
     url = f"{MAILCOW_API_URL}add/mailbox"
     headers = {"X-API-Key": MAILCOW_API_KEY}
     data = {
-        "active": "1", "domain": domain, "local_part": local,
-        "name": display_name, "authsource": "mailcow",
-        "password": DEFAULT_DOMAIN_ADMIN_PASSWORD, "password2": DEFAULT_DOMAIN_ADMIN_PASSWORD,
-        "quota": "3072", "force_pw_update": "1",
-        "tls_enforce_in": "1", "tls_enforce_out": "1",
+        "active": "1",
+        "domain": domain,
+        "local_part": local_part,
+        "name": name,
+        "authsource": "generic-oidc",
+        "password": "",
+        "password2": "",
+        "quota": "3072",
+        "force_pw_update": "0",
+        "tls_enforce_in": "1",
+        "tls_enforce_out": "1",
         "tags": ["scim"]
     }
-    async with httpx.AsyncClient() as client:
+    async with get_async_client() as client:
         resp = await client.post(url, headers=headers, json=data)
-    return resp.status_code, resp.text
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, None
 
-async def update_mailcow_custom_attr(items: list[str], groups: list[str]):
-    url = f"{MAILCOW_API_URL}edit/mailbox/custom-attribute"
+async def update_mailbox(id: str, active: bool = None, name: str = None, tags: list = None):
+    url = f"{MAILCOW_API_URL}edit/mailbox"
     headers = {"X-API-Key": MAILCOW_API_KEY}
+    attr = {}
+    if active is not None:
+        attr["active"] = "1" if active else "0"
+    if name is not None:
+        attr["name"] = name
+    if tags is not None:
+        attr["tags"] = tags
     payload = {
-        "attr": {
-            "attribute": ["groups" for _ in groups],
-            "value": groups
-        },
-        "items": items
+        "attr": attr,
+        "items": [id]
     }
-    async with httpx.AsyncClient() as client:
+    async with get_async_client() as client:
         resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    return resp.json()
+        return resp.status_code, resp.json()
 
-async def provision_domain_admin(username: str):
-    local_part = username.split("@")[0]
-    url = f"{MAILCOW_API_URL}add/domain-admin"
+async def delete_mailbox(id: str):
+    url = f"{MAILCOW_API_URL}delete/mailbox"
     headers = {"X-API-Key": MAILCOW_API_KEY}
-    payload = {
-        "active": "1",
-        "domains": DEFAULT_DOMAIN,
-        "password": DEFAULT_DOMAIN_ADMIN_PASSWORD,
-        "password2": DEFAULT_DOMAIN_ADMIN_PASSWORD,
-        "username": local_part
-    }
-    async with httpx.AsyncClient() as client:
+    payload = [id]
+    async with get_async_client() as client:
         resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code == 409:
-            return {"status": "already_exists"}
-        resp.raise_for_status()
-    return {"status": "created"}
-
-async def delete_domain_admin(username: str):
-    local_part = username.split("@")[0]
-    url = f"{MAILCOW_API_URL}delete/domain-admin"
-    headers = {"X-API-Key": MAILCOW_API_KEY}
-    payload = [local_part]
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    return {"status": "deleted"}
+        return resp.status_code, resp.json()
 
 # --- SCIM Endpoints ---
-
-@app.get("/healthz")
-async def healthz():
+@api.get("/healthz")
+async def healthz_endpoint():
     return {"status": "running"}
 
-@app.get("/metrics")
+@api.get("/metrics", response_class=PlainTextResponse)
 async def metrics_endpoint():
-    output = []
-    for k, v in metrics.items():
-        output.append(f"# HELP {k} SCIM bridge metric")
-        output.append(f"# TYPE {k} counter")
-        output.append(f"{k} {v}")
-    return "\n".join(output)
+    return get_metrics()
 
-@app.get("/Users", response_model=SCIMListResponse)
-async def list_users(startIndex: int = Query(1), count: int = Query(100), authorization: str = Header(None)):
+@api.get("/Users/{user_id}", response_model=SCIMUser)
+async def get_user_endpoint(user_id: str, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-    boxes = await fetch_mailcow_mailboxes()
-    resources = [{
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
-        "id": mb["username"],
-        "userName": mb["username"],
-        "name": {"formatted": mb.get("name", mb["username"])},
-        "emails": [{"value": mb["username"]}],
-        "externalId": mb["username"]
-    } for mb in boxes]
-    return {
-        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": len(resources),
-        "itemsPerPage": count,
-        "startIndex": startIndex,
-        "Resources": resources
-    }
-    
-@app.post("/Users", status_code=status.HTTP_201_CREATED, response_model=SCIMUser)
-async def create_user(user: SCIMUserCreate, authorization: str = Header(None)):
+    return get_user(user_id)
+
+@api.get("/Users", response_model=SCIMListResponse)
+async def get_users_endpoint(index: int = Query(1), count: int = Query(100), authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-    email_addr = user.emails[0]["value"]
-    code, text = await create_mailcow_mailbox(email_addr, user.name.get("formatted", user.userName))
-    if code != 200:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"Mailcow error: {text}")
-    metrics["users_synced_total"] += 1
-    return SCIMUser(
-        schemas=["urn:ietf:params:scim:schemas:core:2.0:User"],
-        id=user.userName,
-        userName=user.userName,
-        name=user.name,
-        emails=user.emails,
-        externalId=user.userName
-    )
-    
-# Same for PUT /Users/{id}, PATCH /Groups/{id}, GET /Groups, etc.
-@app.put("/Users/{user_id}", response_model=SCIMUser)
-async def replace_user(user_id: str, user: SCIMUserCreate, authorization: str = Header(None)):
+    return get_users(index, count)
+
+@api.post("/Users", status_code=status.HTTP_201_CREATED, response_model=SCIMUser)
+async def post_user_endpoint(user: SCIMUser, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-    email_addr = user.emails[0]["value"]
-    code, text = await create_mailcow_mailbox(email_addr, user.name.get("formatted", user_id))
-    if code not in (200, 409):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"Mailcow error: {text}")
-    metrics["users_synced_total"] += 1
-    return SCIMUser(
-        schemas=["urn:ietf:params:scim:schemas:core:2.0:User"],
-        id=user_id,
-        userName=user_id,
-        name=user.name,
-        emails=user.emails,
-        externalId=user_id
-    )
-    
-@app.get("/Groups", response_model=SCIMGroupListResponse)
-async def list_groups(startIndex: int = Query(1), count: int = Query(100), authorization: str = Header(None)):
+    user = await create_user(user)
+    return user
+
+@api.put("/Users/{user_id}", response_model=SCIMUser)
+async def put_user_endpoint(user_id: str, user: SCIMUser, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-    return {
-        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": 0,
-        "itemsPerPage": count,
-        "startIndex": startIndex,
-        "Resources": []
-    }
+    user = await update_user(user_id, user)
+    return user
+
+@api.delete("/Users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user_endpoint(user_id: str, authorization: str = Header(None)):
+    if authorization != f"Bearer {SCIM_TOKEN}":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+    await delete_user(user_id)
     
-@app.get("/Groups/{group_id}", response_model=SCIMGroup)
-async def get_group(group_id: str, authorization: str = Header(None)):
+@api.get("/Groups/{group_id}", response_model=SCIMGroup)
+async def get_group_endpoint(group_id: str, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
     return SCIMGroup(
@@ -358,94 +548,43 @@ async def get_group(group_id: str, authorization: str = Header(None)):
         displayName=group_id,
         members=[]
     )
-    
-@app.post("/Groups", status_code=status.HTTP_201_CREATED, response_model=SCIMGroup)
-async def create_group(group: SCIMGroupCreate, authorization: str = Header(None)):
+
+@api.get("/Groups", response_model=SCIMListResponse)
+async def get_groups_endpoint(index: int = Query(1), count: int = Query(100), authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-        
-    member_usernames = [m["value"] for m in group.members]
-    
-    await update_mailcow_custom_attr(
-        items=member_usernames,
-        groups=[group.displayName]
+    return SCIMListResponse(
+        schemas=["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+        totalResults=0,
+        itemsPerPage=0,
+        startIndex=index,
+        Resources=[]
     )
     
-    if group.displayName == DOMAIN_ADMIN_GROUP_NAME:
-        for email in member_usernames:
-            await provision_domain_admin(email)
-            metrics["domain_admins_created_total"] += 1
-            
-    metrics["groups_synced_total"] += 1
-    return SCIMGroup(
-        schemas=["urn:ietf:params:scim:schemas:core:2.0:Group"],
-        id=group.displayName,
-        displayName=group.displayName,
-        members=group.members
-    )
-    
-@app.put("/Groups/{group_id}", response_model=SCIMGroup)
-async def replace_group(group_id: str, group: SCIMGroupCreate, authorization: str = Header(None)):
+@api.post("/Groups", status_code=status.HTTP_201_CREATED, response_model=SCIMGroup)
+async def post_group_endpoint(group: SCIMGroup, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-        
-    member_usernames = [m["value"] for m in group.members]
+    return group
     
-    await update_mailcow_custom_attr(
-        items=member_usernames,
-        groups=[group.displayName]
-    )
-    
-    if group.displayName == DOMAIN_ADMIN_GROUP_NAME:
-        for email in member_usernames:
-            await provision_domain_admin(email)
-            metrics["domain_admins_created_total"] += 1
-            
-    metrics["groups_synced_total"] += 1
-    return SCIMGroup(
-        schemas=["urn:ietf:params:scim:schemas:core:2.0:Group"],
-        id=group_id,
-        displayName=group.displayName,
-        members=group.members
-    )
-    
-@app.patch("/Groups/{group_id}", response_model=SCIMGroup)
-async def patch_group(group_id: str, patch: SCIMPatchRequest, authorization: str = Header(None)):
+@api.put("/Groups/{group_id}", response_model=SCIMGroup)
+async def patch_group_endpoint(group_id: str, group: SCIMGroup, authorization: str = Header(None)):
     if authorization != f"Bearer {SCIM_TOKEN}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
-        
-    members = []
-    for op in patch.Operations:
-        if op.op.lower() == "replace" and op.path == "members":
-            members = op.value
-            
-    member_usernames = [m["value"] for m in members]
+    return group
+
+@api.delete("/Groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def patch_group_endpoint(group_id: str, authorization: str = Header(None)):
+    if authorization != f"Bearer {SCIM_TOKEN}":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED)
     
-    await update_mailcow_custom_attr(
-        items=member_usernames,
-        groups=[group_id]
-    )
-    
-    if group_id == DOMAIN_ADMIN_GROUP_NAME:
-        for email in member_usernames:
-            await provision_domain_admin(email)
-            metrics["domain_admins_created_total"] += 1
-            
-    metrics["groups_synced_total"] += 1
-    return SCIMGroup(
-        schemas=["urn:ietf:params:scim:schemas:core:2.0:Group"],
-        id=group_id,
-        displayName=group_id,
-        members=members
-    )
-    
-@app.get("/ServiceProviderConfig")
-async def service_provider_config():
+@api.get("/ServiceProviderConfig")
+async def service_provider_config_endpoint():
     return {
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
-        "id": "scim-bridge",
-        "documentationUri": "http://example.com/docs",
-        "patch": {"supported": True},
+        "id": "mailcow-scim-bridge",
+        "documentationUri": "https://github.com/finex7070/mailcow-scim-bridge",
+        "patch": {"supported": False},
         "bulk": {"supported": False},
         "filter": {"supported": False},
         "changePassword": {"supported": False},
