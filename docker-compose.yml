@@ -14,8 +14,10 @@ services:
    MAILCOW_API_KEY: changeme
    # Skip ssl certificate verification
    SKIP_VERIFY_CERTIFICATE: false
-   # Allow deleting users/mailboxes
-   ALLOW_DELETE: false
+   # Allow DELETE operations
+   ALLOW_DELETE: true
+   # Delete mailbox on DELETE
+   MAILCOW_DELETE_MAILBOX: false
   ports:
    - "8081:8080"
   healthcheck:

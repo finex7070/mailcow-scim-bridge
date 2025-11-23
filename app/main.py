@@ -41,7 +41,8 @@ SCIM_TOKEN = os.getenv("SCIM_TOKEN")
 MAILCOW_API_URL = os.getenv("MAILCOW_API_URL")
 MAILCOW_API_KEY = os.getenv("MAILCOW_API_KEY")
 SKIP_VERIFY_CERTIFICATE = os.getenv("SKIP_VERIFY_CERTIFICATE", False)
-ALLOW_DELETE = os.getenv("ALLOW_DELETE", False)
+ALLOW_DELETE = os.getenv("ALLOW_DELETE", True)
+MAILCOW_DELETE_MAILBOX = os.getenv("MAILCOW_DELETE_MAILBOX", False)
 
 REQUIRED_ENV_VARS = {
     "SCIM_TOKEN": SCIM_TOKEN,
@@ -177,29 +178,7 @@ async def create_user(user: SCIMUser):
                 "detail": f"User with id '{user.externalId}' or userName '{user.userName}' already exists",
             })
         code, resp = await create_mailbox(email.split("@")[0], email.split("@")[1], user.displayName)
-        if code == 200 and resp and resp[0]["type"] == "success":
-            user.id = str(uuid.uuid4())
-            dbcur.execute("""
-                INSERT INTO users (id, mailcowId, scimId, active, userName, displayName, emails)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user.id,
-                resp[0]["msg"][1],
-                user.externalId,
-                int(user.active),
-                user.userName,
-                user.displayName,
-                json.dumps(user.emails)
-            ))
-            dbcur.execute("""
-                UPDATE metrics
-                SET value = value + 1
-                WHERE name = 'users_created'
-            """)
-            dbconn.commit()
-            dbconn.close()
-            return user
-        else:
+        if not (code == 200 and resp and resp[0]["type"] == "success"):
             dbconn.close()
             raise HTTPException(status_code=502, detail={
                 "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
@@ -207,12 +186,33 @@ async def create_user(user: SCIMUser):
                 "scimType": "serverError",
                 "detail": "Request failed: upstream API returned an error",
             })
+        user.id = str(uuid.uuid4())
+        dbcur.execute("""
+            INSERT INTO users (id, mailcowId, scimId, active, userName, displayName, emails)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user.id,
+            resp[0]["msg"][1],
+            user.externalId,
+            int(user.active),
+            user.userName,
+            user.displayName,
+            json.dumps(user.emails)
+        ))
+        dbcur.execute("""
+            UPDATE metrics
+            SET value = value + 1
+            WHERE name = 'users_created'
+        """)
+        dbconn.commit()
+        dbconn.close()
+        return user
     else:
         raise HTTPException(status_code=400, detail={
             "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
             "status": "400",
             "scimType": "invalidSyntax",
-            "detail": f"Missing required attribute: emails"
+            "detail": "Missing required attribute: emails"
         })
     
 def get_user(id: str):
@@ -297,8 +297,16 @@ async def delete_user(id: str):
             "scimType": "notFound",
             "detail": f"User with id '{id}' not found"
         })
-    code, resp = await delete_mailbox(row[0])
-    if code == 200 and resp and resp[0]["type"] == "success":
+    if MAILCOW_DELETE_MAILBOX:
+        code, resp = await delete_mailbox(row[0])
+        if not (code == 200 and resp and resp[0]["type"] == "success"):
+            dbconn.close()
+            raise HTTPException(status_code=502, detail={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                "status": "502",
+                "scimType": "serverError",
+                "detail": "Request failed: upstream API returned an error",
+            })
         dbcur.execute("DELETE FROM users WHERE id = ?", (id))
         dbcur.execute("""
             UPDATE metrics
@@ -308,13 +316,14 @@ async def delete_user(id: str):
         dbconn.commit()
         dbconn.close()
     else:
+        dbcur.execute("DELETE FROM users WHERE id = ?", (id))
+        dbcur.execute("""
+            UPDATE metrics
+            SET value = value + 1
+            WHERE name = 'users_deleted'
+        """)
+        dbconn.commit()
         dbconn.close()
-        raise HTTPException(status_code=502, detail={
-            "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
-            "status": "502",
-            "scimType": "serverError",
-            "detail": "Request failed: upstream API returned an error",
-        })
 
 async def update_user(id: str, user: SCIMUser):
     email = get_primary_mail(user.emails)
@@ -322,7 +331,7 @@ async def update_user(id: str, user: SCIMUser):
         dbconn = sqlite3.connect(DB_PATH)
         dbcur = dbconn.cursor()
         dbcur.execute("""
-            SELECT mailcowId, emails
+            SELECT mailcowId
             FROM users
             WHERE id = ?
         """, (id,))
@@ -335,38 +344,19 @@ async def update_user(id: str, user: SCIMUser):
                 "scimType": "notFound",
                 "detail": f"User with id '{id}' not found"
             })
-        emails = json.loads(row[1])
-        email2 = get_primary_mail(emails)
-        if email == email2:
-            code, resp = await update_mailbox(row[0], user.active, user.displayName)
-            if code == 200 and resp and resp[0]["type"] == "success":
-                dbcur.execute("""
-                    Update users
-                    SET mailcowId = ?
-                        scimId = ?,
-                        active = ?,
-                        userName = ?,
-                        displayName = ?,
-                        emails = ?
-                    WHERE id = ?
-                """, (
-                    row[0],
-                    user.externalId,
-                    int(user.active),
-                    user.userName,
-                    user.displayName,
-                    json.dumps(user.emails),
-                    user.id
-                ))
-                dbcur.execute("""
-                    UPDATE metrics
-                    SET value = value + 1
-                    WHERE name = 'users_updated'
-                """)
-                dbconn.commit()
-                dbconn.close()
-                return user
-            else:
+        mailcow_id = row[0]
+        code, resp = await update_mailbox(mailcow_id, user.active, user.displayName)
+        if not (code == 200 and resp and resp[0]["type"] == "success"):
+            dbconn.close()
+            raise HTTPException(status_code=502, detail={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+                "status": "502",
+                "scimType": "serverError",
+                "detail": "Request failed: upstream API returned an error",
+            })
+        if email != mailcow_id:
+            code, resp = await rename_mailbox(mailcow_id, email.split("@")[0], email.split("@")[1])
+            if not (code == 200 and resp and resp[0]["type"] == "success"):
                 dbconn.close()
                 raise HTTPException(status_code=502, detail={
                     "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
@@ -374,66 +364,39 @@ async def update_user(id: str, user: SCIMUser):
                     "scimType": "serverError",
                     "detail": "Request failed: upstream API returned an error",
                 })
-        else:
-            if not ALLOW_DELETE:
-                raise HTTPException(status_code=403, detail={
-                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
-                    "status": "403",
-                    "scimType": "mutability",
-                    "detail": f"Deletion of user with id '{id}' is not allowed."
-                })
-            code, resp = await delete_mailbox(row[0])
-            if code == 200 and resp and resp[0]["type"] == "success":
-                code, resp = await create_mailbox(email.split("@")[0], email.split("@")[1], user.displayName)
-                if code == 200 and resp and resp[0]["type"] == "success":
-                    dbcur.execute("""
-                        Update users
-                        SET mailcowId = ?
-                            scimId = ?,
-                            active = ?,
-                            userName = ?,
-                            displayName = ?,
-                            emails = ?
-                        WHERE id = ?
-                    """, (
-                        resp[0]["msg"][1],
-                        user.externalId,
-                        int(user.active),
-                        user.userName,
-                        user.displayName,
-                        json.dumps(user.emails),
-                        user.id
-                    ))
-                    dbcur.execute("""
-                        UPDATE metrics
-                        SET value = value + 1
-                        WHERE name = 'users_updated'
-                    """)
-                    dbconn.commit()
-                    dbconn.close()
-                    return user
-                else:
-                    dbconn.close()
-                    raise HTTPException(status_code=502, detail={
-                        "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
-                        "status": "502",
-                        "scimType": "serverError",
-                        "detail": "Request failed: upstream API returned an error",
-                    })
-            else:
-                dbconn.close()
-                raise HTTPException(status_code=502, detail={
-                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
-                    "status": "502",
-                    "scimType": "serverError",
-                    "detail": "Request failed: upstream API returned an error",
-                })
+            mailcow_id = resp[0]["msg"][1]
+        dbcur.execute("""
+            Update users
+            SET mailcowId = ?
+                scimId = ?,
+                active = ?,
+                userName = ?,
+                displayName = ?,
+                emails = ?
+            WHERE id = ?
+        """, (
+            mailcow_id,
+            user.externalId,
+            int(user.active),
+            user.userName,
+            user.displayName,
+            json.dumps(user.emails),
+            user.id
+        ))
+        dbcur.execute("""
+            UPDATE metrics
+            SET value = value + 1
+            WHERE name = 'users_updated'
+        """)
+        dbconn.commit()
+        dbconn.close()
+        return user
     else:
         raise HTTPException(status_code=400, detail={
             "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
             "status": "400",
             "scimType": "invalidSyntax",
-            "detail": f"Missing required attribute: emails"
+            "detail": "Missing required attribute: emails"
         })
 
 # --- Mailcow Helper ---
@@ -481,6 +444,23 @@ async def update_mailbox(id: str, active: bool = None, name: str = None, tags: l
         attr["name"] = name
     if tags is not None:
         attr["tags"] = tags
+    payload = {
+        "attr": attr,
+        "items": [id]
+    }
+    async with get_async_client() as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        return resp.status_code, resp.json()
+    
+async def rename_mailbox(id: str, local_part: str, domain: str):
+    url = f"{MAILCOW_API_URL}edit/rename-mbox"
+    headers = {"X-API-Key": MAILCOW_API_KEY}
+    attr = {
+        "domain": domain,
+        "old_local_part": id.split("@")[0],
+        "new_local_part": local_part,
+        "create_alias": "1"
+    }
     payload = {
         "attr": attr,
         "items": [id]

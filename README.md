@@ -40,25 +40,26 @@ docker compose up -d
 
 ## Environment Variables
 
-| Variable           | Description |
-|--------------------|-------------|
-| `SCIM_TOKEN`       | Bearer token used to authenticate SCIM requests |
-| `MAILCOW_API_URL`  | Base URL of the Mailcow Admin API (e.g. `https://mail.example.com/api/v1/`) |
-| `MAILCOW_API_KEY`  | Mailcow API Key with read + write access |
-| `SKIP_VERIFY_CERTIFICATE`  | Skip ssl certificate verification |
-| `ALLOW_DELETE`  | Allow deleting users/mailboxes |
+| Variable                  | Description                                     | Default                          |
+|---------------------------|-------------------------------------------------|----------------------------------|
+| `SCIM_TOKEN`              | Bearer token used to authenticate SCIM requests | changeme                         |
+| `MAILCOW_API_URL`         | Base URL of the Mailcow Admin API               | https://mail.example.com/api/v1/ |
+| `MAILCOW_API_KEY`         | Mailcow API Key with read + write access        | changeme                         |
+| `SKIP_VERIFY_CERTIFICATE` | Skip ssl certificate verification               | false                            |
+| `ALLOW_DELETE`            | Allow DELETE operations                         | true                             |
+| `MAILCOW_DELETE_MAILBOX`  | Delete mailbox on DELETE                        | true                             |
 
 ---
 
 ## API Endpoints
 
-| Path                      | Method(s)              | Description |
-|---------------------------|------------------------|-------------|
-| `/healthz`                | `GET`                  | Healthcheck endpoint |
-| `/metrics`                | `GET`                  | Prometheus metrics (for Grafana) |
-| `/ServiceProviderConfig`  | `GET`                  | SCIM metadata |
-| `/Users`                  | `GET`, `POST`, `PUT`,  `DELETE`  | Sync and provision Mailcow users/mailboxes |
-| `/Groups`                 | `GET`, `POST`, `PUT`, `DELETE` | Only placeholder for now |
+| Path                      | Method(s)                      | Description                                |
+|---------------------------|--------------------------------|--------------------------------------------|
+| `/healthz`                | `GET`                          | Healthcheck endpoint                       |
+| `/metrics`                | `GET`                          | Prometheus metrics (for Grafana)           |
+| `/ServiceProviderConfig`  | `GET`                          | SCIM metadata                              |
+| `/Users`                  | `GET`, `POST`, `PUT`, `DELETE` | Sync and provision Mailcow users/mailboxes |
+| `/Groups`                 | `GET`, `POST`, `PUT`, `DELETE` | Only placeholder for now                   |
 
 ---
 
