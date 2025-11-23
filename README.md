@@ -47,7 +47,7 @@ docker compose up -d
 | `MAILCOW_API_KEY`         | Mailcow API Key with read + write access        | changeme                         |
 | `SKIP_VERIFY_CERTIFICATE` | Skip ssl certificate verification               | false                            |
 | `ALLOW_DELETE`            | Allow DELETE operations                         | true                             |
-| `MAILCOW_DELETE_MAILBOX`  | Delete mailbox on DELETE                        | true                             |
+| `MAILCOW_DELETE_MAILBOX`  | Delete mailbox on DELETE                        | false                            |
 
 ---
 

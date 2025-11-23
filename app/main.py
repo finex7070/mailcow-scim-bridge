@@ -367,7 +367,7 @@ async def update_user(id: str, user: SCIMUser):
             mailcow_id = resp[0]["msg"][1]
         dbcur.execute("""
             Update users
-            SET mailcowId = ?
+            SET mailcowId = ?,
                 scimId = ?,
                 active = ?,
                 userName = ?,
